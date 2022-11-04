@@ -1,0 +1,519 @@
+///// Order is always reproduction, sélection, migration
+initialize() {
+	initializeSLiMModelType("nonWF");
+	defineConstant("date", 20220113);
+	defineConstant("start", clock());
+	defineConstant("dt",0.500); 
+	defineConstant("N01",8000); 
+	defineConstant("N02",8000); 
+	defineConstant("K",10000); 
+	defineConstant("r", 2.0); 
+	defineConstant("gamma",1.50); 
+	defineConstant("m",0.50); 
+	defineConstant("theta", 1.0); 
+	defineConstant("eta", 0.5); 
+	defineConstant("Ngen",2100); 
+	defineConstant("Mut",F); 
+	defineConstant("logmut",-2); 
+	defineConstant("path", "20221020_fig9_11_500/m=0.03_g=0.10_eta=0.50_a=0.10_Ngen=5100_Kslim=10000/slimstorage_0"); 
+	defineConstant("early_migration", F);
+	// neutral mutations in non-coding regions 
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	initializeGenomicElementType("g1",m1,1.0);
+
+////////////////////// Set up our chromosomes: M QTLs, surrounded by neutral regions and one major locus at the end ///////////////////////
+
+	defineConstant("M", 200); 
+	defineConstant("pow", 1/2);
+	////// Set a small for small effects //////
+	defineConstant("a", 0.10); 
+	// mutations representing alleles in QTLs 
+	scriptForQTLs = "if (runif(1) < 0.5) "+ 2*a/M^pow +";else 0;";// take advantage of SLiM wild alleles storage
+	print(scriptForQTLs);
+	initializeMutationType("m2", 0.5, "s", scriptForQTLs); 
+	initializeGenomicElementType("g2", m2, 1.0);
+
+	m2.convertToSubstitution = F;
+	m2.mutationStackPolicy = "l";
+	
+	// Major locus
+	scriptForMajLoc = "if (runif(1) < 0.5)" + 2*eta +";";
+	initializeMutationType("m3", 0.5, "s", scriptForMajLoc); 
+	initializeGenomicElementType("g3", m3, 1.0);
+	m3.convertToSubstitution = F;
+	m3.mutationStackPolicy = "l";
+	
+	// size of neutral buffer on each side /2
+	defineConstant("W", 10);  
+	pos = 0; 
+	q = NULL;
+
+	for (i in 1:M) {  
+		
+		initializeGenomicElement(g1, pos, pos + W-1);  
+		pos = pos + W;  
+		initializeGenomicElement(g2, pos, pos);  q = c(q, pos);  
+		pos = pos + 1;  
+		initializeGenomicElement(g1, pos, pos + W-1);  
+		pos = pos + W; 
+	}
+	defineConstant("Q", q);     // remember our QTL . positions
+	
+	// major locus at the end
+	initializeGenomicElement(g1, pos, pos + W-1);
+	pos = pos + W;
+	defineConstant("plocus",pos);
+	initializeGenomicElement(g3,pos,pos);
+	pos = pos + 1;  
+	initializeGenomicElement(g1, pos, pos + W-1); 
+
+	// all the positions of QTL and major locus
+	qfinal = c(q,plocus);
+	defineConstant("Qfinal",qfinal);
+
+	///// Recombination map /////
+
+	rates = c(rep(c(1e-8, 0.5), M), 1e-8); 
+	ends = (repEach(Qfinal + W, 2) + rep(c(0,1), M+1))[0:((M+1)*2 - 2)]; 
+	initializeRecombinationRate(rates, ends);
+	
+	///// Mutation rates, so that the small loci do not fix /////
+	if (Mut==T) ratesmut= c(rep(c(0,10^(-logmut)),M),0,0);
+	else ratesmut= c(rep(c(0,0),M),0,0);
+	endsmut = c((repEach(Qfinal, 2) + rep(c(-1,0), M+1))[0:((M+1)*2 - 2)],plocus+W);
+	initializeMutationRate(ratesmut,endsmut); ///// Mutation on all the QTLs but not on the major locus.
+
+
+}
+/////////////////////// Haploid reproduction ///////////////////////
+///// Order is always reproduction, selection, migration 
+
+reproduction() {
+	mate=subpop.sampleIndividuals(1);
+	breakpoints=sim.chromosome.drawBreakpoints(individual);
+	(runif(1) < 0.5) ? subpop.addRecombinant(individual.genome1,mate.genome1,breakpoints,NULL,NULL,NULL) else subpop.addRecombinant(mate.genome1,individual.genome1,breakpoints,NULL,NULL,NULL);
+
+	//// Segregational variance ////
+	ginfmate1 = mate.genome1.positionsOfMutationsOfType(m2);
+	ginfind1 = individual.genome1.positionsOfMutationsOfType(m2);
+	ndiff = size(setSymmetricDifference(ginfmate1, ginfind1));
+	segvar = ndiff*a^2/M^(2*pow); /// difference with diploid comes from the size of the effect, here \pm a/M^(1/2)
+	individual.tagF = segvar;
+
+}
+
+modifyChild() {
+	bool = (runif(1)<r*dt);
+	/*if (bool){
+		gparent11 = parent1Genome1.positionsOfMutationsOfType(m2);
+		gparent21 = parent2Genome1.positionsOfMutationsOfType(m2);
+	
+		//// Segregational variance ////
+		ndiff = size(setSymmetricDifference(gparent11, gparent21));
+
+
+		segvar = ndiff*a^2/M^(2*pow);
+		child.tagF = segvar;}*/ //// tagF cannot be empty for the viable offspring, so they get the segregational variance of their parents
+	return bool;
+}
+
+/////////////////////// Initial state ///////////////////////
+1 {	
+	sim.addSubpop("p1", N01);
+	sim.addSubpop("p2", N02);
+	gen1 = p1.genomes;
+	gen2 = p2.genomes;
+	// initial condition
+	for (q in Q)
+	{  	
+		isPlus1 = asLogical(rbinom(size(gen1), 1, 1/2));
+		isPlus2 = asLogical(rbinom(size(gen2), 1, 1/2));
+		gen1[isPlus1].addNewMutation(m2, 2*a/M^(pow), q);
+		gen2[isPlus2].addNewMutation(m2, 2*a/M^(pow), q); 
+	}
+	sim.subpopulations.individuals.genome2.removeMutations();
+	gen2.addNewMutation(m3, 2*eta, plocus);
+	/// !!!!! Haploid : Multiply alleles effects by 2 (and consider just one genome per individual) !!!!!
+	sim.subpopulations.individuals.genome2.removeMutations();
+	gen1 = p1.individuals.genome1;
+	gen2 = p2.individuals.genome1;
+	fix_count = 0;
+	close_fix_count=0;
+	for (q in Q)
+	{	
+		gen1muts_q = gen1.mutations[gen1.mutations.position == q];
+		gen2muts_q = gen2.mutations[gen2.mutations.position == q];
+		freqA1 = length(gen1muts_q.selectionCoeff > a/M^pow)/p1.individualCount; // SelectionCoeff of SLiM does not have a good precision, so do not use == test
+		freqA2 = length(gen2muts_q.selectionCoeff > a/M^pow)/p2.individualCount;
+		freqA = (freqA1*p1.individualCount + freqA2*p2.individualCount)/sum(sim.subpopulations.individualCount);
+		if ((freqA>0)&(freqA<1))
+		{
+			fix_count=fix_count+1;
+		}
+		if ((freqA>0.02)&(freqA<0.98))
+		{
+			close_fix_count=close_fix_count+1;
+		}
+		writeFile(path+"/freqA01_"+M+"_"+pow+".txt",freqA1+ "",T);
+		writeFile(path+"/freqA02_"+M+"_"+pow+".txt",freqA2+ "",T);
+		writeFile(path+"/freqA0_"+M+"_"+pow+".txt",freqA+ "",T);
+	}
+}
+/////////////////////// Run ///////////////////////
+
+2:99 early() {
+	cat(p1.individualCount/K + "\n");
+	sim.subpopulations.individuals.genome2.removeMutations();
+	for (subpop in c(p1,p2)) 
+	{  
+		nIndividuals = subpop.individualCount;
+
+		// viability selection
+		inds = subpop.individuals;
+		phenotype = inds.genome1.sumOfMutationsOfType(m2) + inds.genome1.sumOfMutationsOfType(m3) - a*M^(1-pow) - eta; //to recenter according to the shift of effects
+		optimum = (subpop == p1 ? -theta  else theta);
+		inds.fitnessScaling = exp(-dt*(phenotype - optimum)^2*gamma)*exp(-dt*nIndividuals/K);
+		inds.tagF = phenotype;
+	}
+}
+100 early() {
+	cat(p1.individualCount/K + "\n");
+	sim.subpopulations.individuals.genome2.removeMutations();
+	for (subpop in c(p1,p2)) 
+	{  
+		nIndividuals = subpop.individualCount;
+
+		// viability selection
+		inds = subpop.individuals;
+		phenotype = inds.genome1.sumOfMutationsOfType(m2) + inds.genome1.sumOfMutationsOfType(m3) - a*M^(1-pow) - eta; //to recenter according to the shift of effects
+		optimum = (subpop == p1 ? -theta  else theta);
+		event = (subpop == p1 ? dt  else 1.);
+		inds.fitnessScaling = exp(-dt*(phenotype - optimum)^2*gamma)*exp(-dt*nIndividuals/(K*event));
+		inds.tagF = phenotype;
+	}
+}
+
+2:100 late() {
+	cat(p1.individualCount/K + "\n");
+}
+fitness(m2) { return 1.0; }
+fitness(m3) { return 1.0; }
+
+/////////// End of burn-in : record ///////////
+
+100 late() {
+	
+	// Precise recording of the initial state (size and phenotypes)
+	ind1_A_idx = p1.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind1_A = p1.individuals[ind1_A_idx];
+	ind1_a = p1.individuals[!ind1_A_idx];
+	ind2_A_idx = p2.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind2_A = p2.individuals[ind2_A_idx];
+	ind2_a = p2.individuals[!ind2_A_idx];
+	
+	N1A = sum(ind1_A_idx);
+	N1a = p1.individualCount - N1A;
+	N2A = sum(ind2_A_idx);
+	N2a = p2.individualCount - N2A;
+	initialphen1_A = ind1_A.tagF;
+	initialphen1_a = ind1_a.tagF;
+	initialphen2_A = ind2_A.tagF;
+	initialphen2_a = ind2_a.tagF;
+	initialphen1 = p1.individuals.tagF;
+	initialphen2 = p2.individuals.tagF;
+	writeFile(path+"/n1_"+ sim.generation +".txt", initialphen1 + "\n",T);
+	writeFile(path+"/n2_"+ sim.generation +".txt", initialphen2 + "\n",T);
+	writeFile(path+"/n1A_"+ sim.generation +".txt", initialphen1_A + "\n",T);
+	writeFile(path+"/n1a_"+ sim.generation +".txt", initialphen1_a + "\n",T);
+	writeFile(path+"/n2A_"+ sim.generation +".txt", initialphen2_A + "\n",T);
+	writeFile(path+"/n2a_"+ sim.generation +".txt", initialphen2_a + "\n",T);
+	writeFile(path+"/N1A.txt", N1A/K + "\n",T);
+	writeFile(path+"/N2A.txt", N2A/K + "\n",T);
+	writeFile(path+"/N1a.txt", N1a/K + "\n",T);
+	writeFile(path+"/N2a.txt", N2a/K + "\n",T);
+}
+
+/////////// Add migration after 100 generation of burn in ///////////
+
+101:2100 early() { 
+	sim.subpopulations.individuals.genome2.removeMutations();
+	parents1 = p1.individuals[p1.individuals.age > 0];
+	parents2 = p2.individuals[p2.individuals.age > 0];
+	segvar_mean_1 = mean(parents1.tagF);
+	segvar_variance_1 = var(parents1.tagF);
+	segvar_mean_2 = mean(parents2.tagF);
+	segvar_variance_2 = var(parents2.tagF);
+	writeFile(path + "/mean_segvar_1.txt", segvar_mean_1+ "\n",T);
+	writeFile(path + "/variance_segvar_1.txt", segvar_variance_1+ "\n",T);
+	writeFile(path + "/mean_segvar_2.txt", segvar_mean_2+ "\n",T);
+	writeFile(path + "/variance_segvar_2.txt", segvar_variance_2+ "\n",T);
+	if (early_migration)
+	{
+		///////// random migration /////////
+		nIndividuals = sum(sim.subpopulations.individualCount);
+		nMigrants = rpois(1, nIndividuals * m*dt);
+		nMigrants = min(c(nMigrants, nIndividuals));
+		migrants = sample(sim.subpopulations.individuals, nMigrants);
+		for (migrant in migrants)
+		{
+			do dest = sample(sim.subpopulations, 1);
+			while (dest == migrant.subpopulation);
+		
+			dest.takeMigrants(migrant);
+		}
+	}
+	for (subpop in c(p1,p2)) 
+	{  
+		nIndividuals = subpop.individualCount;
+
+		// viability selection
+		inds = subpop.individuals;
+		phenotype = inds.genome1.sumOfMutationsOfType(m2) + inds.genome1.sumOfMutationsOfType(m3) - a*M^(1-pow) - eta; //to recenter according to the shift of effects
+		optimum = (subpop == p1 ? -theta  else theta);
+		inds.fitnessScaling = exp(-dt*gamma*(phenotype - optimum)^2)*exp(-dt*nIndividuals/K);
+		inds.tagF = phenotype;
+	}
+}
+101:2099 late() { 
+	if (early_migration == F)
+	{
+		///////// random migration /////////
+		nIndividuals = sum(sim.subpopulations.individualCount);
+		nMigrants = rpois(1, nIndividuals * m*dt);
+		nMigrants = min(c(nMigrants, nIndividuals));
+		migrants = sample(sim.subpopulations.individuals, nMigrants);
+		for (migrant in migrants)
+		{
+			do dest = sample(sim.subpopulations, 1);
+			while (dest == migrant.subpopulation);
+		
+			dest.takeMigrants(migrant);
+		}
+	}
+	////// Records /////
+	sim.subpopulations.individuals.genome2.removeMutations();
+	
+	// Allelic frequencies //
+	ind1_A_idx = p1.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind1_A = p1.individuals[ind1_A_idx];
+	ind1_a = p1.individuals[!ind1_A_idx];
+	ind2_A_idx = p2.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind2_A = p2.individuals[ind2_A_idx];
+	ind2_a = p2.individuals[!ind2_A_idx];
+	N1A = sum(ind1_A_idx);
+	N1a = p1.individualCount - N1A;
+	N2A = sum(ind2_A_idx);
+	N2a = p2.individualCount - N2A;
+	P1 = N1A/p1.individualCount;
+	P2 = N2A/p2.individualCount;
+	writeFile(path+"/p1.txt",P1+ "",T);
+	writeFile(path+"/p2.txt",P2+ "",T);
+	
+	writeFile(path+"/N1A.txt", N1A/K + "\n",T);
+	writeFile(path+"/N2A.txt", N2A/K + "\n",T);
+	writeFile(path+"/N1a.txt", N1a/K + "\n",T);
+	writeFile(path+"/N2a.txt", N2a/K + "\n",T);
+
+	mean_trait_1A = mean(ind1_A.tagF);
+	variance_trait_1A = var(ind1_A.tagF);
+	mean_trait_2A = mean(ind2_A.tagF);
+	variance_trait_2A = var(ind2_A.tagF);
+	// skew_trait_1A = sum((ind1_A.tagF - mean(ind1_A.tagF))^3)/N1A/var(ind1_A.tagF)^(3/2);
+	// skew_trait_2A = sum((ind2_A.tagF - mean(ind2_A.tagF))^3)/N2A/var(ind2_A.tagF)^(3/2);
+	writeFile(path + "/mean_1A.txt", mean_trait_1A + "\n",T);
+	writeFile(path+"/variance_1A.txt", variance_trait_1A + "\n",T);
+	writeFile(path + "/mean_2A.txt", mean_trait_2A + "\n",T);
+	writeFile(path+"/variance_2A.txt", variance_trait_2A + "\n",T);
+	// writeFile(path+"/skew_1A.txt",skew_trait_1A + "\n",T);
+	// writeFile(path+"/skew_2A.txt",skew_trait_2A + "\n",T);
+
+	mean_trait_1a = mean(ind1_a.tagF);
+	variance_trait_1a = var(ind1_a.tagF);
+	mean_trait_2a = mean(ind2_a.tagF);
+	variance_trait_2a = var(ind2_a.tagF);
+	// skew_trait_1a = sum((ind1_a.tagF - mean(ind1_a.tagF))^3)/N1a/var(ind1_a.tagF)^(3/2);
+	// skew_trait_2a = sum((ind2_a.tagF - mean(ind2_a.tagF))^3)/N2a/var(ind2_a.tagF)^(3/2);
+	writeFile(path + "/mean_1a.txt", mean_trait_1a + "\n",T);
+	writeFile(path+"/variance_1a.txt", variance_trait_1a + "\n",T);
+	writeFile(path + "/mean_2a.txt", mean_trait_2a + "\n",T);
+	writeFile(path+"/variance_2a.txt", variance_trait_2a + "\n",T);
+	// writeFile(path+"/skew_1a.txt",skew_trait_1a + "\n",T);
+	// writeFile(path+"/skew_2a.txt",skew_trait_2a + "\n",T); 
+
+	writeFile(path+"/variance_global_"+M+"_"+pow+".txt",var(sim.subpopulations.individuals.tagF)+ "\n",T);
+
+	if (sim.generation == 200){
+	// Precise recording of the initial state (size and phenotypes)
+	ind1_A_idx = p1.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind1_A = p1.individuals[ind1_A_idx];
+	ind1_a = p1.individuals[!ind1_A_idx];
+	ind2_A_idx = p2.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind2_A = p2.individuals[ind2_A_idx];
+	ind2_a = p2.individuals[!ind2_A_idx];
+	
+	phen1_A = ind1_A.tagF;
+	phen1_a = ind1_a.tagF;
+	phen2_A = ind2_A.tagF;
+	phen2_a = ind2_a.tagF;
+	initialphen1 = p1.individuals.tagF;
+	initialphen2 = p2.individuals.tagF;
+	writeFile(path+"/n1_"+ sim.generation +".txt", initialphen1 + "\n",T);
+	writeFile(path+"/n2_"+ sim.generation +".txt", initialphen2 + "\n",T);
+	writeFile(path+"/n1A_"+ sim.generation +".txt", phen1_A + "\n",T);
+	writeFile(path+"/n1a_"+ sim.generation +".txt", phen1_a + "\n",T);
+	writeFile(path+"/n2A_"+ sim.generation +".txt", phen2_A + "\n",T);
+	writeFile(path+"/n2a_"+ sim.generation +".txt", phen2_a + "\n",T);
+	writeFile(path+"/N1A_"+ sim.generation +".txt", N1A/K + "\n",T);
+	writeFile(path+"/N2A_"+ sim.generation +".txt", N2A/K + "\n",T);
+	writeFile(path+"/N1a_"+ sim.generation +".txt", N1a/K + "\n",T);
+	writeFile(path+"/N2a_"+ sim.generation +".txt", N2a/K + "\n",T);
+	}
+
+	cat("Elapsed: " + (clock() - start)+"\n");
+	cat(sim.generation-1+"\n");
+	if (sum(sim.subpopulations.individualCount) < 2+K/1000)
+	{
+		
+		P1 = sum(p1.individuals.genome1.containsMutations(m3))/p1.individualCount;
+		P2 = sum(p2.individuals.genome1.containsMutations(m3))/p2.individualCount;
+		cat("Final p1 = " + P1 + "\n");
+		cat("Final p2 = "+ P2 + "\n");
+		writeFile(path+"/final_phenotype_pop1_"+M+"_"+pow+".txt", paste(p1.individuals.tagF+ "\n"));
+		writeFile(path+"/final_phenotype_pop2_"+M+"_"+pow+".txt", paste(p2.individuals.tagF+ "\n"));
+		writeFile(path+"/final_variance_global_"+M+"_"+pow+".txt",var(sim.subpopulations.individuals.tagF)+ "\n",T);
+		stop("Global extinction in generation " + sim.generation + ".");
+	}
+}
+
+/////////// End of run ///////////
+s1 2100 late() 
+{ 	
+	if (early_migration == F)
+	{
+		///////// random migration /////////
+		nIndividuals = sum(sim.subpopulations.individualCount);
+		nMigrants = rpois(1, nIndividuals * m*dt);
+		nMigrants = min(c(nMigrants, nIndividuals));
+		migrants = sample(sim.subpopulations.individuals, nMigrants);
+		for (migrant in migrants)
+		{
+			do dest = sample(sim.subpopulations, 1);
+			while (dest == migrant.subpopulation);
+		
+			dest.takeMigrants(migrant);
+		}
+	}
+	cat("-------------------------------\n"); 
+	cat("Output for end of generation " + (sim.generation - 1) + ":\n\n");
+	
+
+	//Size of subpopulation
+
+	cat("Final pop1 size = " + p1.individualCount/K + "\n");
+	cat("FInal pop2 size = " + p2.individualCount/K + "\n");
+	
+	// Allelic frequencies //
+	
+	sim.subpopulations.individuals.genome2.removeMutations();
+	
+	ind1_A_idx = p1.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind1_A = p1.individuals[ind1_A_idx];
+	ind1_a = p1.individuals[!ind1_A_idx];
+	ind2_A_idx = p2.individuals.genome1.containsMarkerMutation(m3, plocus);
+	ind2_A = p2.individuals[ind2_A_idx];
+	ind2_a = p2.individuals[!ind2_A_idx];
+	N1A = sum(ind1_A_idx);
+	N1a = p1.individualCount - N1A;
+	N2A = sum(ind2_A_idx);
+	N2a = p2.individualCount - N2A;
+	P1 = N1A/p1.individualCount;
+	P2 = N2A/p2.individualCount;
+	writeFile(path+"/p1.txt",P1+ "",T);
+	writeFile(path+"/p2.txt",P2+ "",T);
+	
+	writeFile(path+"/N1A.txt", N1A/K + "\n",T);
+	writeFile(path+"/N2A.txt", N2A/K + "\n",T);
+	writeFile(path+"/N1a.txt", N1a/K + "\n",T);
+	writeFile(path+"/N2a.txt", N2a/K + "\n",T);
+
+	mean_trait_1A = mean(ind1_A.tagF);
+	variance_trait_1A = var(ind1_A.tagF);
+	mean_trait_2A = mean(ind2_A.tagF);
+	variance_trait_2A = var(ind2_A.tagF);
+	// skew_trait_1A = sum((ind1_A.tagF - mean(ind1_A.tagF))^3)/N1A/var(ind1_A.tagF)^(3/2);
+	// skew_trait_2A = sum((ind2_A.tagF - mean(ind2_A.tagF))^3)/N2A/var(ind2_A.tagF)^(3/2);
+	writeFile(path + "/mean_1A.txt", mean_trait_1A + "\n",T);
+	writeFile(path+"/variance_1A.txt", variance_trait_1A + "\n",T);
+	writeFile(path + "/mean_2A.txt", mean_trait_2A + "\n",T);
+	writeFile(path+"/variance_2A.txt", variance_trait_2A + "\n",T);
+	// writeFile(path+"/skew_1A.txt",skew_trait_1A + "\n",T);
+	// writeFile(path+"/skew_2A.txt",skew_trait_2A + "\n",T);
+
+	mean_trait_1a = mean(ind1_a.tagF);
+	variance_trait_1a = var(ind1_a.tagF);
+	mean_trait_2a = mean(ind2_a.tagF);
+	variance_trait_2a = var(ind2_a.tagF);
+	// skew_trait_1a = sum((ind1_a.tagF - mean(ind1_a.tagF))^3)/N1a/var(ind1_a.tagF)^(3/2);
+	// skew_trait_2a = sum((ind2_a.tagF - mean(ind2_a.tagF))^3)/N2a/var(ind2_a.tagF)^(3/2);
+	writeFile(path + "/mean_1a.txt", mean_trait_1a + "\n",T);
+	writeFile(path+"/variance_1a.txt", variance_trait_1a + "\n",T);
+	writeFile(path + "/mean_2a.txt", mean_trait_2a + "\n",T);
+	writeFile(path+"/variance_2a.txt", variance_trait_2a + "\n",T);
+	// writeFile(path+"/skew_1a.txt",skew_trait_1a + "\n",T);
+	// writeFile(path+"/skew_2a.txt",skew_trait_2a + "\n",T);
+
+	
+	initialphen1_A = ind1_A.tagF;
+	initialphen1_a = ind1_a.tagF;
+	initialphen2_A = ind2_A.tagF;
+	initialphen2_a = ind2_a.tagF;
+	initialphen1 = p1.individuals.tagF;
+	initialphen2 = p2.individuals.tagF;
+	writeFile(path+"/n1_"+ sim.generation +".txt", initialphen1 + "\n",T);
+	writeFile(path+"/n2_"+ sim.generation +".txt", initialphen2 + "\n",T);
+	writeFile(path+"/n1A_"+ sim.generation +".txt", initialphen1_A + "\n",T);
+	writeFile(path+"/n1a_"+ sim.generation +".txt", initialphen1_a + "\n",T);
+	writeFile(path+"/n2A_"+ sim.generation +".txt", initialphen2_A + "\n",T);
+	writeFile(path+"/n2a_"+ sim.generation +".txt", initialphen2_a + "\n",T);
+
+	
+	cat("Final p1 = " + P1 + "\n");
+	cat("Final p2 = "+ P2 + "\n");
+	
+	writeFile(path+"/variance_global_"+M+"_"+pow+".txt",var(sim.subpopulations.individuals.tagF)+ "\n",T);
+	//
+	///// Check if small alleles have fixed ///// Problem using mutationsFrequencies since new mutations are considered as different: resolve to an ugly code
+	gen1 = p1.individuals.genome1;
+	gen2 = p2.individuals.genome1;
+	fix_count = 0;
+	close_fix_count=0;
+	for (q in Q)
+	{	
+		gen1muts_q = gen1.mutations[gen1.mutations.position == q];
+		gen2muts_q = gen2.mutations[gen2.mutations.position == q];
+		freqA1 = length(gen1muts_q[gen1muts_q.selectionCoeff > a/M^pow])/p1.individualCount; // SelectionCoeff of SLiM does not have a good precision, so do not use == test
+		freqA2 = length(gen2muts_q[gen2muts_q.selectionCoeff > a/M^pow])/p2.individualCount;
+		freqA = (freqA1*p1.individualCount + freqA2*p2.individualCount)/sum(sim.subpopulations.individualCount);
+		if ((freqA>0)&(freqA<1))
+		{
+			fix_count=fix_count+1;
+		}
+		if ((freqA>0.02)&(freqA<0.98))
+		{
+			close_fix_count=close_fix_count+1;
+		}
+		writeFile(path+"/freqA1_"+M+"_"+pow+".txt",freqA1+ "",T);
+		writeFile(path+"/freqA2_"+M+"_"+pow+".txt",freqA2+ "",T);
+		writeFile(path+"/freqA_"+M+"_"+pow+".txt",freqA+ "",T);
+	}
+	writeFile(path+"/pourcentage_fixed_"+M+"_"+pow+".txt",(M-fix_count)/M*100+ "",T);
+	writeFile(path+"/pourcentage_almost(0.02)_fixed_"+M+"_"+pow+".txt",(M-close_fix_count)/M*100+ "", T);
+	print("Pourcentage fixed : "+(M-fix_count)/M*100);
+	print("Pourcentage almost fixed : "+(M-close_fix_count)/M*100);
+
+
+	writeFile(path+"/final_phenotype_pop1_"+M+"_"+pow+".txt",paste(p1.individuals.tagF+ "\n"));
+	writeFile(path+"/final_phenotype_pop2_"+M+"_"+pow+".txt",paste(p2.individuals.tagF+ "\n"));
+	writeFile(path+"/final_variance_global_"+M+"_"+pow+".txt",var(sim.subpopulations.individuals.tagF)+ "\n",T);
+	cat("Elapsed: " + (clock() - start));
+}
